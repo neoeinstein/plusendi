@@ -1,34 +1,11 @@
 use aliri_braid::braid;
-use lazy_regex::{Lazy, lazy_regex};
-use std::borrow::Cow;
 use std::collections::hash_set::HashSet;
-use regex::Regex;
-use thiserror::Error;
 
-static STATION: Lazy<Regex> = lazy_regex!(r#"([0-9]?[A-Za-z]+)([0-9]+)([A-Za-z][A-Za-z0-9]*)"#);
+pub mod modem;
+mod types;
 
-#[derive(Debug, Error)]
-#[error("invalid station identity")]
-pub struct InvalidStationId;
-
-#[braid(normalizer)]
-pub struct StationId;
-
-impl aliri_braid::Normalizer for StationId {
-    type Error = InvalidStationId;
-
-    fn normalize(s: &str) -> Result<Cow<str>, Self::Error> {
-        if STATION.is_match(s) {
-            if s.as_bytes().iter().any(|&b| b'a' <= b && b <= b'z') {
-                Ok(Cow::Borrowed(s))
-            } else {
-                Ok(Cow::Owned(s.to_ascii_uppercase()))
-            }
-        } else {
-            Err(InvalidStationId)
-        }
-    } 
-}
+pub use modem::Modem;
+pub use types::{StationId, StationIdRef};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Traffic {

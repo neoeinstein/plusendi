@@ -7,9 +7,16 @@ edition = "2021"
 
 [dependencies]
 aliri_braid = "*"
+bytes = "*"
 color-eyre = "*"
+dotenv = "*"
 lazy-regex = "*"
+nom = "7.1"
 regex = "*"
 serialport = "*"
 thiserror = "*"
+tokio = { version = "*", features = ["full"] }
+tracing = "*"
+tracing-error = "*"
+tracing-subscriber = "*"
 #tui = "*"
