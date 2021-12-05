@@ -261,7 +261,10 @@ pub enum ConnectionState<'a> {
     Disconnected,
     Pending,
     Canceled,
-    Connected { other_station: &'a StationIdRef },
+    Connected {
+        my_station: &'a StationIdRef,
+        other_station: &'a StationIdRef
+    },
 }
 
 fn disconnected(data: &[u8]) -> IResult<&[u8], ConnectionState> {
@@ -277,9 +280,15 @@ fn canceled(data: &[u8]) -> IResult<&[u8], ConnectionState> {
 }
 
 fn connected(data: &[u8]) -> IResult<&[u8], ConnectionState> {
-    let (rest, _) = nom::bytes::complete::tag("CONNECTED")(data)?;
-    let (rest, other_station) = crate::types::callsign(rest)?;
-    Ok((rest, ConnectionState::Connected { other_station }))
+    let (rest, (my_station, other_station)) = nom::sequence::preceded(
+        nom::bytes::complete::tag("CONNECTED "),
+        nom::sequence::separated_pair(
+            crate::types::callsign,
+            nom::bytes::complete::tag(" "),
+            crate::types::callsign,
+        ),
+    )(data)?;
+    Ok((rest, ConnectionState::Connected { my_station, other_station }))
 }
 
 fn connection_state(data: &[u8]) -> IResult<&[u8], ConnectionState> {
@@ -363,6 +372,7 @@ fn line(data: &[u8]) -> IResult<&[u8], &[u8]> {
     nom::sequence::terminated(nom::bytes::streaming::take_until1("\r"), nom::bytes::streaming::tag("\r"))(data)
 }
 
+#[tracing::instrument(skip(rx, tx, stream), err)]
 pub async fn manage_modem_thread(mut rx: Receiver<(Command, tokio::sync::oneshot::Sender<Result<(), ()>>)>, tx: Sender<TransceiverCommand>, mut stream: TcpStream) -> color_eyre::Result<()> {
     let mut cmd_buffer = String::with_capacity(32);
     let mut upd_buffer = bytes::BytesMut::with_capacity(32);
@@ -410,7 +420,7 @@ pub async fn manage_modem_thread(mut rx: Receiver<(Command, tokio::sync::oneshot
     Ok(())
 }
 
-#[tracing::instrument(skip(stream, upd_buffer), err)]
+#[tracing::instrument(skip(stream, upd_buffer, tx), err)]
 async fn do_a_thing(stream: &mut TcpStream, upd_buffer: &mut bytes::BytesMut, tx: &Sender<TransceiverCommand>) -> color_eyre::Result<Vec<Result<(), ()>>> {
     let mut to_acknowledge = Vec::new();
     match stream.try_read_buf(upd_buffer) {

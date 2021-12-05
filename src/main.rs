@@ -5,6 +5,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use plusendi::StationId;
 use structopt::StructOpt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug, StructOpt)]
 #[structopt(about, author)]
@@ -108,7 +109,98 @@ async fn main() -> color_eyre::Result<()> {
     reply_rx.await?.map_err(|_| color_eyre::eyre::eyre!("command went wrong"))?;
 
     tracing::info!("sleep time");
-    std::io::stdin().read_line(&mut String::new());
+    let mut to_send = String::new();
+    let mut read = bytes::BytesMut::new();
+
+    fn line(data: &[u8]) -> nom::IResult<&[u8], &[u8]> {
+        nom::sequence::terminated(nom::bytes::streaming::take_until1("\r"), nom::bytes::streaming::tag("\r"))(data)
+    }
+
+    'out: loop {
+        data.read_buf(&mut read).await?;
+        let retain_after = {
+            let mut data = &read[..];
+            while data.len() > 0 {
+                match line(&data) {
+                    Ok((remaining, line)) => {
+                        tracing::trace!(line = std::str::from_utf8(line).unwrap(), remaining = std::str::from_utf8(remaining).unwrap(), "received complete line");
+                        data = remaining;
+                        println!("{}", String::from_utf8_lossy(line));
+                        if line.ends_with(&[b'>']) {
+                            break 'out;
+                        }
+                    },
+                    Err(err) if err.is_incomplete() => {
+                        tracing::trace!(buffer = std::str::from_utf8(data).unwrap(), "incomplete");
+                        break
+                    },
+                    Err(err) => {
+                        return Err(err.to_owned().into())
+                    },
+                }
+            }
+            read.len() - data.len()
+        };
+        if retain_after == read.len() {
+            read.clear();
+        } else if retain_after > 0 {
+            let new = read.split_off(retain_after);
+            std::mem::replace(&mut read, new);
+            tracing::trace!(bytes = read.len(), "retained incomplete parts");
+        }
+    }
+    // loop {
+    //     match std::io::stdin().read_line(&mut to_send) {
+    //         Ok(0) => break,
+    //         Ok(b) => tracing::trace!(bytes = b, "sending bytes"),
+    //         Err(error) => return Err(error.into()),
+    //     }
+    //     // data.write_all(to_send.as_bytes()).await?;
+    //     // data.write_all(b"\r").await?;
+    // }
+    let mut input = tokio::io::BufReader::new(tokio::io::stdin());
+    input.read_line(&mut String::new()).await?;
+    let ident = format!("{}-{}", env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION"));
+    let to_be_sent = format!("[{}|-B2FWIHJM$]\rFF\r", ident);
+    data.write_all(to_be_sent.as_bytes()).await?;;
+    loop {
+        let count = data.read_buf(&mut read).await?;
+        if count == 0 {
+            break;
+        }
+        let retain_after = {
+            let mut data = &read[..];
+            while data.len() > 0 {
+                match line(&data) {
+                    Ok((remaining, line)) => {
+                        tracing::trace!(line = std::str::from_utf8(line).unwrap(), remaining = std::str::from_utf8(remaining).unwrap(), "received complete line");
+                        data = remaining;
+                        println!("{}", String::from_utf8_lossy(line));
+                    },
+                    Err(err) if err.is_incomplete() => {
+                        tracing::trace!(buffer = std::str::from_utf8(data).unwrap(), "incomplete");
+                        break
+                    },
+                    Err(err) => {
+                        return Err(err.to_owned().into())
+                    },
+                }
+            }
+            read.len() - data.len()
+        };
+        if retain_after == read.len() {
+            read.clear();
+        } else if retain_after > 0 {
+            let new = read.split_off(retain_after);
+            std::mem::replace(&mut read, new);
+            tracing::trace!(bytes = read.len(), "retained incomplete parts");
+        }
+    }
+
+    // data.write_all(b"[Plusendi-0.0.1-B2FWIHJM$]\rFF\r");
+
+    tracing::info!("sleep time");
+    input.read_line(&mut String::new()).await?;
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     cmd_tx.send((plusendi::modem::vara::Command::Disconnect, reply_tx)).await?;
