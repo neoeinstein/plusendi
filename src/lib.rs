@@ -2,6 +2,7 @@ use aliri_braid::braid;
 use std::collections::hash_set::HashSet;
 
 pub mod modem;
+pub mod rig;
 mod types;
 
 pub use modem::Modem;

@@ -9,6 +9,7 @@ use tokio::sync::mpsc::{error::TryRecvError, Sender, Receiver};
 
 //use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use crate::{StationId, StationIdRef};
+use crate::rig::elecraft::kx3::TransmitState;
 
 pub struct Vara {
     my_call: StationId,
@@ -362,7 +363,7 @@ fn line(data: &[u8]) -> IResult<&[u8], &[u8]> {
     nom::sequence::terminated(nom::bytes::streaming::take_until1("\r"), nom::bytes::streaming::tag("\r"))(data)
 }
 
-pub async fn manage_modem_thread(mut rx: Receiver<(Command, tokio::sync::oneshot::Sender<Result<(), ()>>)>, /*tx: Sender<Update<'static>>, */mut stream: TcpStream) -> color_eyre::Result<()> {
+pub async fn manage_modem_thread(mut rx: Receiver<(Command, tokio::sync::oneshot::Sender<Result<(), ()>>)>, tx: Sender<TransceiverCommand>, mut stream: TcpStream) -> color_eyre::Result<()> {
     let mut cmd_buffer = String::with_capacity(32);
     let mut upd_buffer = bytes::BytesMut::with_capacity(32);
     let mut response_queue = VecDeque::with_capacity(4);
@@ -383,7 +384,7 @@ pub async fn manage_modem_thread(mut rx: Receiver<(Command, tokio::sync::oneshot
                 }
             },
             ready = stream.readable() => {
-                let results = do_a_thing(&mut stream, &mut upd_buffer)?;
+                let results = do_a_thing(&mut stream, &mut upd_buffer, &tx).await?;
                 for result in results {
                     if let Some(reply) = response_queue.pop_front() {
                         let _ = reply.send(result);
@@ -396,7 +397,7 @@ pub async fn manage_modem_thread(mut rx: Receiver<(Command, tokio::sync::oneshot
     }
     tracing::info!(expected_replies = response_queue.len(), "command input closed");
     while !response_queue.is_empty() {
-        let results = do_a_thing(&mut stream, &mut upd_buffer)?;
+        let results = do_a_thing(&mut stream, &mut upd_buffer, &tx).await?;
         for result in results {
             if let Some(reply) = response_queue.pop_front() {
                 let _ = reply.send(result);
@@ -410,7 +411,7 @@ pub async fn manage_modem_thread(mut rx: Receiver<(Command, tokio::sync::oneshot
 }
 
 #[tracing::instrument(skip(stream, upd_buffer), err)]
-fn do_a_thing(stream: &mut TcpStream, upd_buffer: &mut bytes::BytesMut) -> color_eyre::Result<Vec<Result<(), ()>>> {
+async fn do_a_thing(stream: &mut TcpStream, upd_buffer: &mut bytes::BytesMut, tx: &Sender<TransceiverCommand>) -> color_eyre::Result<Vec<Result<(), ()>>> {
     let mut to_acknowledge = Vec::new();
     match stream.try_read_buf(upd_buffer) {
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(to_acknowledge),
@@ -443,7 +444,7 @@ fn do_a_thing(stream: &mut TcpStream, upd_buffer: &mut bytes::BytesMut) -> color
                                     tracing::debug!("received heartbeat");
                                 }
                                 Update::TransceiverControl(control) => {
-                                    //tracing::debug!("")
+                                    tx.send(control).await?;
                                 }
                                 _ => {}
                             }
