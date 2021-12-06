@@ -150,8 +150,9 @@ async fn main() -> color_eyre::Result<()> {
     let mut input = tokio::io::BufReader::new(tokio::io::stdin());
     input.read_line(&mut String::new()).await?;
     let ident = format!("{}-{}", env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION"));
-    let to_be_sent = format!("[{}|-B2FWIHJM$]\rFF\r", ident);
-    vara_stream.write_all(to_be_sent.as_bytes()).await?;;
+    let to_be_sent = format!("[{}-B2FWIHJM$]\rFF\r", ident);
+    vara_stream.write_all(to_be_sent.as_bytes()).await?;
+    read.clear();
     loop {
         let count = vara_stream.read_buf(&mut read).await?;
         if count == 0 {

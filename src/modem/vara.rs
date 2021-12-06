@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::fmt::{Debug, Formatter, Write};
+use std::future::Future;
 use std::io::{Error, IoSlice};
 use std::num::NonZeroU16;
 use std::pin::Pin;
@@ -742,9 +743,22 @@ impl VaraTnc {
         self.status.connection.changed().await?;
 
         if self.status.connection.borrow().is_connected() {
+            let mut subscriber = self.status.connection.clone();
+            let (remote_dc, remote_disconnect) = tokio::sync::oneshot::channel();
+            let _remote_dc = tokio::spawn(async move {
+                loop {
+                    let _ = subscriber.changed().await;
+                    if subscriber.borrow().is_disconnected() {
+                        remote_dc.send(());
+                        break;
+                    }
+                }
+            });
+
             Ok(VaraStream {
                 tnc: self,
                 force_disconnect: Some(force_dc),
+                remote_disconnect: remote_disconnect,
             })
         } else if self.status.connection.borrow().is_disconnected() {
             Err(color_eyre::eyre::eyre!("failed to connect"))
@@ -763,6 +777,7 @@ impl VaraTnc {
 pub struct VaraStream<'a> {
     tnc: &'a mut VaraTnc,
     force_disconnect: Option<tokio::sync::oneshot::Sender<()>>,
+    remote_disconnect: tokio::sync::oneshot::Receiver<()>,
 }
 
 impl<'a> VaraStream<'a> {
@@ -794,45 +809,65 @@ impl<'a> PinnedDrop for VaraStream<'a> {
 
 impl<'a> AsyncRead for VaraStream<'a> {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
-        if !self.tnc.status.connection.borrow().is_connected() {
-            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "connection closed on remote end")))
+        let this = self.project();
+        match Pin::new(this.remote_disconnect).poll(cx) {
+            Poll::Pending => {}
+            Poll::Ready(_) => {
+                return Poll::Ready(Ok(()));
+            }
         }
 
-        self.pinned_tnc().pinned_data().poll_read(cx, buf)
+        Pin::new(&mut **this.tnc).pinned_data().poll_read(cx, buf)
     }
 }
 
 impl<'a> AsyncWrite for VaraStream<'a> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Error>> {
-        if !self.tnc.status.connection.borrow().is_connected() {
-            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "connection closed on remote end")))
+        let this = self.project();
+        match Pin::new(this.remote_disconnect).poll(cx) {
+            Poll::Pending => {}
+            Poll::Ready(_) => {
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "connection closed on remote end")));
+            }
         }
 
-        self.pinned_tnc().pinned_data().poll_write(cx, buf)
+        Pin::new(&mut **this.tnc).pinned_data().poll_write(cx, buf)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        if !self.tnc.status.connection.borrow().is_connected() {
-            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "connection closed on remote end")))
+        let this = self.project();
+        match Pin::new(this.remote_disconnect).poll(cx) {
+            Poll::Pending => {}
+            Poll::Ready(_) => {
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "connection closed on remote end")));
+            }
         }
 
-        self.pinned_tnc().pinned_data().poll_flush(cx)
+        Pin::new(&mut **this.tnc).pinned_data().poll_flush(cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        if !self.tnc.status.connection.borrow().is_connected() {
-            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "connection closed on remote end")))
+        let this = self.project();
+        match Pin::new(this.remote_disconnect).poll(cx) {
+            Poll::Pending => {}
+            Poll::Ready(_) => {
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "connection closed on remote end")));
+            }
         }
 
-        self.pinned_tnc().pinned_data().poll_shutdown(cx)
+        Pin::new(&mut **this.tnc).pinned_data().poll_shutdown(cx)
     }
 
     fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<Result<usize, Error>> {
-        if !self.tnc.status.connection.borrow().is_connected() {
-            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "connection closed on remote end")))
+        let this = self.project();
+        match Pin::new(this.remote_disconnect).poll(cx) {
+            Poll::Pending => {}
+            Poll::Ready(_) => {
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "connection closed on remote end")));
+            }
         }
 
-        self.pinned_tnc().pinned_data().poll_write_vectored(cx, bufs)
+        Pin::new(&mut **this.tnc).pinned_data().poll_write_vectored(cx, bufs)
     }
 
     fn is_write_vectored(&self) -> bool {
