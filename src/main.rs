@@ -1,6 +1,4 @@
-use std::io::{self, Read, Write};
 use std::num::NonZeroU16;
-use tokio::net::TcpStream;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -61,11 +59,16 @@ async fn main() -> color_eyre::Result<()> {
     // read_response(&mut rig)?;
     // return Ok(());
 
-    let mut tnc = plusendi::modem::vara::VaraTnc::builder()
-        .host(opt.modem_address)
-        .control_port(opt.modem_control_port)
-        .build()
-        .await?;
+    let mut builder = plusendi::modem::vara::VaraTnc::builder();
+
+    builder.host(opt.modem_address)
+        .control_port(opt.modem_control_port);
+
+    if let Some(port) = opt.modem_data_port {
+        builder.data_port(port);
+    }
+
+    let mut tnc = builder.build().await?;
 
     tnc.send_callsign(opt.my_call.clone()).await?;
     tnc.send_compression(plusendi::modem::vara::CompressionMode::Text).await?;
@@ -98,7 +101,6 @@ async fn main() -> color_eyre::Result<()> {
     let mut vara_stream = tnc.connect(opt.my_call, opt.target).await?;
 
     tracing::info!("sleep time");
-    let mut to_send = String::new();
     let mut read = bytes::BytesMut::new();
 
     fn line(data: &[u8]) -> nom::IResult<&[u8], &[u8]> {
@@ -134,7 +136,7 @@ async fn main() -> color_eyre::Result<()> {
             read.clear();
         } else if retain_after > 0 {
             let new = read.split_off(retain_after);
-            std::mem::replace(&mut read, new);
+            read = new;
             tracing::trace!(bytes = read.len(), "retained incomplete parts");
         }
     }
@@ -182,7 +184,7 @@ async fn main() -> color_eyre::Result<()> {
             read.clear();
         } else if retain_after > 0 {
             let new = read.split_off(retain_after);
-            std::mem::replace(&mut read, new);
+            read = new;
             tracing::trace!(bytes = read.len(), "retained incomplete parts");
         }
     }
@@ -194,13 +196,5 @@ async fn main() -> color_eyre::Result<()> {
 
     // tokio::time::sleep(std::time::Duration::from_secs(90)).await;
 
-    Ok(())
-}
-
-fn read_response(ctl: &mut dyn Read) -> io::Result<()> {
-    let mut buffer = [0; 6];
-    let count = ctl.read(&mut buffer)?;
-    let data = std::str::from_utf8(&buffer[0..count]).expect("ASCII");
-    println!("data: {}", data.trim());
     Ok(())
 }

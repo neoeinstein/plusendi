@@ -654,6 +654,7 @@ dependencies = [
  "pin-project",
  "regex",
  "structopt",
+ "test-log",
  "thiserror",
  "tokio",
  "tokio-serial",
@@ -859,6 +860,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-xid",
+]
+
+[[package]]
+name = "test-log"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb78caec569a40f42c078c798c0e35b922d9054ec28e166f0d6ac447563d91a4"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -15,6 +15,7 @@ nom = "7.1"
 pin-project = "*"
 regex = "*"
 structopt = "*"
+test-log = { version = "*", default-features = false, features = ["trace"] }
 thiserror = "*"
 tokio = { version = "*", features = ["full"] }
 tokio-serial = "*"

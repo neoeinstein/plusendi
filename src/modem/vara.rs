@@ -1,5 +1,4 @@
-use std::borrow::Cow;
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::fmt::{Debug, Formatter, Write};
 use std::future::Future;
@@ -8,22 +7,15 @@ use std::num::NonZeroU16;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
-use nom::{AsBytes, Finish, IResult, ParseTo};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, Interest, ReadBuf};
-use tokio::net::{TcpStream, ToSocketAddrs};
-use tokio::sync::mpsc::{error::TryRecvError, Sender, Receiver};
+use nom::{AsBytes, Finish, IResult};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc::{Sender, Receiver};
 
 
 //use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use crate::{StationId, StationIdRef};
-use crate::rig::elecraft::kx3::TransmitState;
 
-pub struct Vara {
-    my_call: StationId,
-    control: TcpStream,
-    data: TcpStream,
-    registered: Option<Registration>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Registration {
@@ -448,7 +440,7 @@ async fn manage_modem_thread(mut rx: Receiver<(Command, tokio::sync::oneshot::Se
                     command_active = false
                 }
             },
-            ready = stream.readable() => {
+            _ = stream.readable() => {
                 let results = do_a_thing(&mut stream, &mut upd_buffer, &mut tx)?;
                 for result in results {
                     if let Some(reply) = response_queue.pop_front() {
@@ -549,7 +541,7 @@ fn do_a_thing(stream: &mut TcpStream, upd_buffer: &mut bytes::BytesMut, tx: &mut
       upd_buffer.clear();
     } else if retain_after > 0 {
         let new = upd_buffer.split_off(retain_after);
-        std::mem::replace(upd_buffer, new);
+        *upd_buffer = new;
         tracing::trace!(bytes = upd_buffer.len(), "retained incomplete parts");
     }
     Ok(to_acknowledge)
@@ -722,6 +714,30 @@ impl VaraTnc {
         self.status.transceiver_control.clone()
     }
 
+    pub fn remote_registration(&self) -> Registration {
+        *self.status.remote_registration.borrow()
+    }
+
+    pub fn last_heartbeat(&self) -> Instant {
+        *self.status.last_heartbeat.borrow()
+    }
+
+    pub fn local_registration(&self, station: &StationIdRef) -> Registration {
+        if self.status.registered_calls.borrow().contains(station) {
+            Registration::Registered
+        } else {
+            Registration::Unregistered
+        }
+    }
+
+    pub fn buffer(&self) -> usize {
+        *self.status.buffer.borrow()
+    }
+
+    pub fn busy_state(&self) -> BusyState {
+        *self.status.busy_state.borrow()
+    }
+
     #[tracing::instrument(skip(self), err)]
     pub async fn connect<'a>(&'a mut self, from: StationId, to: StationId) -> color_eyre::Result<VaraStream<'a>> {
         self.send_command(Command::Connect(ConnectCommand {
@@ -749,7 +765,7 @@ impl VaraTnc {
                 loop {
                     let _ = subscriber.changed().await;
                     if subscriber.borrow().is_disconnected() {
-                        remote_dc.send(());
+                        let _ = remote_dc.send(());
                         break;
                     }
                 }
@@ -787,10 +803,6 @@ impl<'a> VaraStream<'a> {
 
     pub async fn abort(self) -> color_eyre::Result<()> {
         self.tnc.send_abort().await
-    }
-
-    fn pinned_tnc(self: Pin<&mut Self>) -> Pin<&mut VaraTnc> {
-        Pin::new(&mut **self.project().tnc)
     }
 }
 

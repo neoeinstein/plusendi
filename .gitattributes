@@ -1,0 +1,2 @@
+samples/*.raw -text
+samples/winlink.txt eol=crlf

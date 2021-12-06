@@ -1,9 +1,8 @@
-use std::collections::VecDeque;
 use std::fmt;
 use std::fmt::Write;
 use nom::{AsBytes, IResult};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::mpsc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -117,7 +116,7 @@ pub async fn manage_rig_thread<D: AsyncRead + AsyncWrite + Unpin + 'static>(mut 
                   upd_buffer.clear();
                 } else if retain_after > 0 {
                     let new = upd_buffer.split_off(retain_after);
-                    std::mem::replace(&mut upd_buffer, new);
+                    upd_buffer = new;
                     tracing::trace!(bytes = upd_buffer.len(), "retained incomplete parts");
                 }
             }
