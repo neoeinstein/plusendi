@@ -67,6 +67,7 @@ async fn main() -> color_eyre::Result<()> {
         .build()
         .await?;
 
+    tnc.send_callsign(opt.my_call.clone()).await?;
     tnc.send_compression(plusendi::modem::vara::CompressionMode::Text).await?;
     tnc.send_bandwidth(plusendi::modem::vara::BandwidthMode::Wide).await?;
     let mut transceiver_cmd = tnc.subscribe_rig_command();
