@@ -1,4 +1,5 @@
 use std::io::{self, Read, Write};
+use std::num::NonZeroU16;
 use tokio::net::TcpStream;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -21,10 +22,10 @@ struct Opt {
     modem_address: std::net::IpAddr,
 
     #[structopt(long, default_value = "8300")]
-    modem_control_port: u16,
+    modem_control_port: NonZeroU16,
 
     #[structopt(long)]
-    modem_data_port: Option<u16>,
+    modem_data_port: Option<NonZeroU16>,
 
     #[structopt(long)]
     rig_control: String,
@@ -60,53 +61,40 @@ async fn main() -> color_eyre::Result<()> {
     // read_response(&mut rig)?;
     // return Ok(());
 
-    let mut ctl = TcpStream::connect((opt.modem_address, opt.modem_control_port)).await?;
-    let modem_data_port = opt.modem_data_port.unwrap_or_else(|| opt.modem_control_port + 1);
-    let mut data = TcpStream::connect((opt.modem_address, modem_data_port)).await?;
+    let mut tnc = plusendi::modem::vara::VaraTnc::builder()
+        .host(opt.modem_address)
+        .control_port(opt.modem_control_port)
+        .build()
+        .await?;
 
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
-    let (vara_cmd_tx, mut vara_cmd_rx) = tokio::sync::mpsc::channel(1);
+    tnc.send_compression(plusendi::modem::vara::CompressionMode::Text).await?;
+    tnc.send_bandwidth(plusendi::modem::vara::BandwidthMode::Wide).await?;
+    let mut transceiver_cmd = tnc.subscribe_rig_command();
+
     let (rig_tx, rig_rx) = tokio::sync::mpsc::channel(1);
 
     let mut rig = tokio_serial::SerialStream::open(&tokio_serial::new(opt.rig_control, opt.rig_baud))?;
     #[cfg(unix)]
-    rig.set_exclusive(true)?;
+        rig.set_exclusive(true)?;
 
-    let _thread = tokio::spawn(plusendi::modem::vara::manage_modem_thread(cmd_rx, vara_cmd_tx, ctl));
     let _thread2 = tokio::spawn(plusendi::rig::elecraft::kx3::manage_rig_thread(rig_rx, rig));
-    let rig_clone_tx = rig_tx.clone();
     let _thread3 = tokio::spawn(async move {
-        while let Some(cmd) = vara_cmd_rx.recv().await {
-            tracing::trace!(?cmd, "received automated rig control request");
-            let request = match cmd {
-                plusendi::modem::vara::TransceiverCommand::Transmit => plusendi::rig::elecraft::kx3::TransmitState::Transmit,
-                plusendi::modem::vara::TransceiverCommand::Receive => plusendi::rig::elecraft::kx3::TransmitState::Receive,
+        while let Ok(()) = transceiver_cmd.changed().await {
+            let request = {
+                let cmd = *transceiver_cmd.borrow();
+                tracing::trace!(?cmd, "received automated rig control request");
+                match cmd {
+                    plusendi::modem::vara::TransceiverCommand::Transmit => plusendi::rig::elecraft::kx3::TransmitState::Transmit,
+                    plusendi::modem::vara::TransceiverCommand::Receive => plusendi::rig::elecraft::kx3::TransmitState::Receive,
+                }
             };
-            rig_clone_tx.send(plusendi::rig::elecraft::kx3::Command::SetTransmitState(request)).await?;
+            rig_tx.send(plusendi::rig::elecraft::kx3::Command::SetTransmitState(request)).await?;
         }
         tracing::info!("all done with automatic rig control");
         color_eyre::Result::<_, color_eyre::Report>::Ok(())
     });
 
-    rig_tx.send(plusendi::rig::elecraft::kx3::Command::SetTransmitState(plusendi::rig::elecraft::kx3::TransmitState::Transmit)).await?;
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    rig_tx.send(plusendi::rig::elecraft::kx3::Command::SetTransmitState(plusendi::rig::elecraft::kx3::TransmitState::Receive)).await?;
-
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    cmd_tx.send((plusendi::modem::vara::Command::SetCall(plusendi::modem::vara::MyCallSigns(opt.my_call.clone(), Vec::new())), reply_tx)).await?;
-    reply_rx.await?.map_err(|_| color_eyre::eyre::eyre!("command went wrong"))?;
-
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    cmd_tx.send((plusendi::modem::vara::Command::SetCompression(plusendi::modem::vara::CompressionMode::Text), reply_tx)).await?;
-    reply_rx.await?.map_err(|_| color_eyre::eyre::eyre!("command went wrong"))?;
-
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    cmd_tx.send((plusendi::modem::vara::Command::Listen(plusendi::modem::vara::ListenMode::Enable), reply_tx)).await?;
-    reply_rx.await?.map_err(|_| color_eyre::eyre::eyre!("command went wrong"))?;
-
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    cmd_tx.send((plusendi::modem::vara::Command::Connect(plusendi::modem::vara::ConnectCommand { origin: opt.my_call, target: opt.target, path: plusendi::modem::vara::ConnectPath::Direct }), reply_tx)).await?;
-    reply_rx.await?.map_err(|_| color_eyre::eyre::eyre!("command went wrong"))?;
+    let mut vara_stream = tnc.connect(opt.my_call, opt.target).await?;
 
     tracing::info!("sleep time");
     let mut to_send = String::new();
@@ -117,7 +105,7 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     'out: loop {
-        data.read_buf(&mut read).await?;
+        vara_stream.read_buf(&mut read).await?;
         let retain_after = {
             let mut data = &read[..];
             while data.len() > 0 {
@@ -162,9 +150,9 @@ async fn main() -> color_eyre::Result<()> {
     input.read_line(&mut String::new()).await?;
     let ident = format!("{}-{}", env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION"));
     let to_be_sent = format!("[{}|-B2FWIHJM$]\rFF\r", ident);
-    data.write_all(to_be_sent.as_bytes()).await?;;
+    vara_stream.write_all(to_be_sent.as_bytes()).await?;;
     loop {
-        let count = data.read_buf(&mut read).await?;
+        let count = vara_stream.read_buf(&mut read).await?;
         if count == 0 {
             break;
         }
@@ -201,15 +189,6 @@ async fn main() -> color_eyre::Result<()> {
 
     tracing::info!("sleep time");
     input.read_line(&mut String::new()).await?;
-
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    cmd_tx.send((plusendi::modem::vara::Command::Disconnect, reply_tx)).await?;
-    reply_rx.await?.map_err(|_| color_eyre::eyre::eyre!("command went wrong"))?;
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    cmd_tx.send((plusendi::modem::vara::Command::Listen(plusendi::modem::vara::ListenMode::CQ), reply_tx)).await?;
-    reply_rx.await?.map_err(|_| color_eyre::eyre::eyre!("command went wrong"))?;
-
-    drop(cmd_tx);
 
     // tokio::time::sleep(std::time::Duration::from_secs(90)).await;
 
