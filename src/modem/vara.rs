@@ -8,9 +8,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
 use nom::{AsBytes, Finish, IResult};
+use nom::error::VerboseError;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Sender, Receiver};
+use crate::parser::MappableParserInputError;
 
 
 //use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
@@ -124,7 +126,7 @@ pub enum TncResponse<'a> {
     CommandResult(CommandResult),
 }
 
-fn tnc_response(data: &[u8]) -> IResult<&[u8], TncResponse> {
+fn tnc_response(data: &[u8]) -> IResult<&[u8], TncResponse, VerboseError<&[u8]>> {
     nom::branch::alt((
         nom::combinator::map(command_result, TncResponse::CommandResult),
         nom::combinator::map(update, TncResponse::Update),
@@ -143,7 +145,7 @@ pub enum Update<'a> {
     // CQFrame(CQFrame<'a>),
 }
 
-fn update(data: &[u8]) -> IResult<&[u8], Update> {
+fn update(data: &[u8]) -> IResult<&[u8], Update, VerboseError<&[u8]>> {
     nom::branch::alt((
         nom::combinator::value(Update::Heartbeat, nom::bytes::complete::tag("IAMALIVE")),
         buffer,
@@ -155,7 +157,7 @@ fn update(data: &[u8]) -> IResult<&[u8], Update> {
     ))(data)
 }
 
-fn buffer(data: &[u8]) -> IResult<&[u8], Update> {
+fn buffer(data: &[u8]) -> IResult<&[u8], Update, VerboseError<&[u8]>> {
     let (remaining, bytes_remaining) = nom::sequence::preceded(
         nom::bytes::complete::tag("BUFFER "),
         nom::combinator::map_res(nom::bytes::complete::take_while(nom::character::is_digit), |x: &[u8]| usize::from_str_radix(unsafe { std::str::from_utf8_unchecked(x) }, 10))
@@ -163,7 +165,7 @@ fn buffer(data: &[u8]) -> IResult<&[u8], Update> {
     Ok((remaining, Update::Buffer { bytes_remaining }))
 }
 
-fn registered(data: &[u8]) -> IResult<&[u8], Update> {
+fn registered(data: &[u8]) -> IResult<&[u8], Update, VerboseError<&[u8]>> {
     nom::sequence::preceded(
         nom::bytes::complete::tag("REGISTERED "),
         nom::combinator::map(crate::types::callsign, |my_call: &StationIdRef| Update::Registered { my_call })
@@ -236,7 +238,7 @@ pub enum CommandResult {
     Wrong,
 }
 
-fn command_result(data: &[u8]) -> IResult<&[u8], CommandResult> {
+fn command_result(data: &[u8]) -> IResult<&[u8], CommandResult, VerboseError<&[u8]>> {
     nom::branch::alt((nom::combinator::value(CommandResult::Ok, nom::bytes::complete::tag("OK")), nom::combinator::value(CommandResult::Wrong, nom::bytes::complete::tag("WRONG"))))(data)
 }
 
@@ -246,7 +248,7 @@ pub enum TransceiverCommand {
     Transmit,
 }
 
-fn transmit_state(data: &[u8]) -> IResult<&[u8], TransceiverCommand> {
+fn transmit_state(data: &[u8]) -> IResult<&[u8], TransceiverCommand, VerboseError<&[u8]>> {
     let (rest, is_transmit) = nom::sequence::preceded(nom::bytes::complete::tag("PTT "), on_or_off)(data)?;
     Ok((rest, if is_transmit { TransceiverCommand::Transmit } else { TransceiverCommand::Receive }))
 }
@@ -257,12 +259,12 @@ pub enum BusyState {
     Busy,
 }
 
-fn busy_state(data: &[u8]) -> IResult<&[u8], BusyState> {
+fn busy_state(data: &[u8]) -> IResult<&[u8], BusyState, VerboseError<&[u8]>> {
     let (rest, is_busy) = nom::sequence::preceded(nom::bytes::complete::tag("BUSY "), on_or_off)(data)?;
     Ok((rest, if is_busy { BusyState::Busy } else { BusyState::NotBusy }))
 }
 
-fn on_or_off(data: &[u8]) -> IResult<&[u8], bool> {
+fn on_or_off(data: &[u8]) -> IResult<&[u8], bool, VerboseError<&[u8]>> {
     nom::branch::alt((nom::combinator::value(true, nom::bytes::complete::tag("ON")), nom::combinator::value(false, nom::bytes::complete::tag("OFF"))))(data)
 }
 
@@ -314,19 +316,19 @@ impl<'a> ConnectionState<'a> {
     }
 }
 
-fn disconnected(data: &[u8]) -> IResult<&[u8], ConnectionState> {
+fn disconnected(data: &[u8]) -> IResult<&[u8], ConnectionState, VerboseError<&[u8]>> {
     nom::combinator::value(ConnectionState::Disconnected, nom::bytes::complete::tag("DISCONNECTED"))(data)
 }
 
-fn pending(data: &[u8]) -> IResult<&[u8], ConnectionState> {
+fn pending(data: &[u8]) -> IResult<&[u8], ConnectionState, VerboseError<&[u8]>> {
     nom::combinator::value(ConnectionState::Pending, nom::bytes::complete::tag("PENDING"))(data)
 }
 
-fn canceled(data: &[u8]) -> IResult<&[u8], ConnectionState> {
+fn canceled(data: &[u8]) -> IResult<&[u8], ConnectionState, VerboseError<&[u8]>> {
     nom::combinator::value(ConnectionState::Canceled, nom::bytes::complete::tag("CANCELPENDING"))(data)
 }
 
-fn connected(data: &[u8]) -> IResult<&[u8], ConnectionState> {
+fn connected(data: &[u8]) -> IResult<&[u8], ConnectionState, VerboseError<&[u8]>> {
     let (rest, (my_station, other_station)) = nom::sequence::preceded(
         nom::bytes::complete::tag("CONNECTED "),
         nom::sequence::separated_pair(
@@ -338,7 +340,7 @@ fn connected(data: &[u8]) -> IResult<&[u8], ConnectionState> {
     Ok((rest, ConnectionState::Connected { my_station, other_station }))
 }
 
-fn connection_state(data: &[u8]) -> IResult<&[u8], ConnectionState> {
+fn connection_state(data: &[u8]) -> IResult<&[u8], ConnectionState, VerboseError<&[u8]>> {
     nom::branch::alt((disconnected, pending, canceled, connected))(data)
 }
 //
@@ -415,7 +417,7 @@ fn connection_state(data: &[u8]) -> IResult<&[u8], ConnectionState> {
 //     }
 // }
 
-fn line(data: &[u8]) -> IResult<&[u8], &[u8]> {
+fn line(data: &[u8]) -> IResult<&[u8], &[u8], VerboseError<&[u8]>> {
     nom::sequence::terminated(nom::bytes::streaming::take_until1("\r"), nom::bytes::streaming::tag("\r"))(data)
 }
 
@@ -467,6 +469,14 @@ async fn manage_modem_thread(mut rx: Receiver<(Command, tokio::sync::oneshot::Se
     Ok(())
 }
 
+fn stringify_input<T: std::fmt::Display>(error: nom::Err<VerboseError<T>>) -> nom::Err<VerboseError<String>> {
+    error.map(|err| {
+        VerboseError {
+            errors: err.errors.into_iter().map(|e| (e.0.to_string(), e.1)).collect()
+        }
+    })
+}
+
 #[tracing::instrument(skip(stream, upd_buffer, tx), err)]
 fn do_a_thing(stream: &mut TcpStream, upd_buffer: &mut bytes::BytesMut, tx: &mut TncStatusSender) -> color_eyre::Result<Vec<CommandResult>> {
     let mut to_acknowledge = Vec::new();
@@ -481,12 +491,12 @@ fn do_a_thing(stream: &mut TcpStream, upd_buffer: &mut bytes::BytesMut, tx: &mut
     let retain_after = {
         let mut data = upd_buffer.as_bytes();
         while data.len() > 0 {
-            match line(&data) {
+            match line(&data).try_map_into_str().map_err(stringify_input) {
                 Ok((remaining, line)) => {
                     tracing::trace!(line = std::str::from_utf8(line).unwrap(), remaining = std::str::from_utf8(remaining).unwrap(), "received complete line");
                     data = remaining;
 
-                    match nom::combinator::all_consuming(tnc_response)(line).map_err(|e| e.map_input(|i| String::from_utf8(i.into()).unwrap())).finish() {
+                    match nom::combinator::all_consuming(tnc_response)(line).try_map_into_str().map_err(stringify_input).finish() {
                         Ok((_ , response)) => {
                             tracing::debug!(?response, "received tnc data");
                             match response {
@@ -531,7 +541,7 @@ fn do_a_thing(stream: &mut TcpStream, upd_buffer: &mut bytes::BytesMut, tx: &mut
                     break
                 },
                 Err(err) => {
-                    return Err(err.to_owned().into())
+                    return Err(err.into())
                 },
             }
         }

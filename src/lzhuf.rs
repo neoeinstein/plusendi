@@ -151,6 +151,50 @@ impl LzHufState {
     }
 }
 
+struct Bitbuffer<'a> {
+    bit_buffer: u16,
+    bit_pos: u8,
+    output: &'a mut Vec<u8>,
+}
+
+impl<'a> Bitbuffer<'a> {
+    fn new(output: &'a mut Vec<u8>) -> Self {
+        Self {
+            bit_pos: 0,
+            bit_buffer: 0,
+            output,
+        }
+    }
+
+    fn put_code(&mut self, l: u8, c: u16) {
+        self.bit_buffer |= c >> self.bit_pos;
+        self.bit_pos += l;
+        if self.bit_pos >= 8 {
+            self.output.push((self.bit_buffer >> 8) as u8);
+            self.bit_pos -= 8;
+            if self.bit_pos >= 8 {
+                self.output.push(self.bit_buffer as u8);
+                // self.codesize += 2;
+                self.bit_pos -= 8;
+                self.bit_buffer = c << (l - self.bit_pos) as usize;
+            } else {
+                self.bit_buffer = self.bit_buffer << 8;
+                // self.codesize += 1;
+            }
+        }
+    }
+
+    fn finish(self) {}
+}
+
+impl<'a> Drop for Bitbuffer<'a> {
+    fn drop(&mut self) {
+        if self.bit_pos > 0 {
+            self.output.push((self.bit_buffer >> 8) as u8);
+        }
+    }
+}
+
 struct Biterator<I> {
     bit_buffer: u32,
     bit_pos: u8,
@@ -314,6 +358,238 @@ mod tests {
     }
 }
 
+pub struct Encoder<'a> {
+    state: LzHufState,
+    match_length: u16,
+    match_position: u16,
+    output: Bitbuffer<'a>,
+    lson: [u16; N as usize + 1],
+    rson: [u16; N as usize + 257],
+    dad: [u16; N as usize + 1],
+}
+
+impl<'a> Encoder<'a> {
+    fn new(output: &'a mut Vec<u8>) -> Self {
+        let mut rson = [0; N as usize + 257];
+        for i in (N + 1)..(N + 257) {
+            rson[i as usize] = NIL;
+        }
+
+        let mut dad = [NIL; N as usize + 1];
+        dad[N as usize] = 0;
+        Self {
+            state: LzHufState::new(),
+            match_length: 0,
+            match_position: 0,
+            output: Bitbuffer::new(output),
+            lson: [0; N as usize + 1],
+            rson,
+            dad,
+        }
+    }
+
+    fn insert_node(&mut self, r: u16) {
+        let mut cmp = 1;
+        let key = &self.state.text_buffer[r as usize..];
+        let mut p = N + 1 + key[0] as u16;
+        self.lson[r as usize] = NIL;
+        self.rson[r as usize] = NIL;
+        self.match_length = 0;
+        loop {
+            if cmp >= 0 {
+                if self.rson[p as usize] != NIL {
+                    p = self.rson[p as usize];
+                } else {
+                    self.rson[p as usize] = r;
+                    self.dad[r as usize] = p;
+                    return;
+                }
+            } else {
+                if self.lson[p as usize] != NIL {
+                    p = self.lson[p as usize];
+                } else {
+                    self.lson[p as usize] = r;
+                    self.dad[r as usize] = p;
+                    return;
+                }
+            }
+
+            let mut i = 1;
+            while i < F {
+                cmp = key[i as usize].wrapping_sub(self.state.text_buffer[(p + i) as usize]);
+                if cmp != 0 {
+                    break;
+                }
+                i += 1;
+            }
+
+            if i > THRESHOLD {
+                if i > self.match_length {
+                    self.match_position = ((r.wrapping_sub(p)) & (N - 1)) - 1;
+                    self.match_length = i;
+                    if i >= F {
+                        break;
+                    }
+                }
+                if i == self.match_length {
+                    let c = ((r.wrapping_sub(p)) & (N - 1)) - 1;
+                    if c < self.match_position {
+                        self.match_position = c;
+                    }
+                }
+            }
+        }
+
+        self.dad[r as usize] = self.dad[p as usize];
+        self.lson[r as usize] = self.lson[p as usize];
+        self.rson[r as usize] = self.rson[p as usize];
+        self.dad[self.lson[p as usize] as usize] = r;
+        self.dad[self.rson[p as usize] as usize] = r;
+
+        if self.rson[self.dad[p as usize] as usize] == p {
+            self.rson[self.dad[p as usize] as usize] = r;
+        } else {
+            self.lson[self.dad[p as usize] as usize] = r;
+        }
+
+        self.dad[p as usize] = NIL;
+    }
+
+    fn delete_node(&mut self, p: u16) {
+        if self.dad[p as usize] == NIL {
+            return;
+        }
+
+        let mut q;
+        if self.rson[p as usize] == NIL {
+            q = self.lson[p as usize];
+        } else if self.lson[p as usize] == NIL {
+            q = self.rson[p as usize];
+        } else {
+            q = self.lson[p as usize];
+            if self.rson[q as usize] != NIL {
+                loop {
+                    q = self.rson[q as usize];
+                    if self.rson[q as usize] == NIL {
+                        break;
+                    }
+                }
+
+                self.rson[self.dad[q as usize] as usize] = self.lson[q as usize];
+                self.dad[self.lson[q as usize] as usize] = self.dad[q as usize];
+                self.lson[q as usize] = self.dad[p as usize];
+                self.dad[self.lson[p as usize] as usize] = q;
+            }
+
+            self.rson[q as usize] = self.rson[p as usize];
+            self.dad[self.rson[p as usize] as usize] = q;
+        }
+
+        self.dad[q as usize] = self.dad[p as usize];
+
+        if self.rson[self.dad[p as usize] as usize] == p {
+            self.rson[self.dad[p as usize] as usize] = q;
+        } else {
+            self.lson[self.dad[p as usize] as usize] = q;
+        }
+
+        self.dad[p as usize] = NIL;
+    }
+
+    fn encode_char(&mut self, c: u16) {
+        let mut i = 0u16;
+        let mut j = 0u8;
+        let mut k = self.state.parents[(c + T) as usize];
+        loop {
+            i = i >> 1;
+            if k & 1 != 0 {
+                i = i.wrapping_add(0x8000);
+            }
+            j += 1;
+
+            k = self.state.parents[k as usize];
+            if k == R {
+                break;
+            }
+        }
+
+        self.output.put_code(j, i);
+        self.state.update(c as u16);
+    }
+
+    fn encode_position(&mut self, c: u16) {
+        let i = c >> 6;
+        self.output.put_code(p_len[i as usize], (p_code[i as usize] as u16) << 8);
+        self.output.put_code(6, (c & 0x3f) << 10);
+    }
+
+    fn encode<I: IntoIterator<IntoIter=Y, Item = u8>, Y: Iterator<Item = u8>>(&mut self, input: I) {
+        let mut iterator = input.into_iter();
+        let mut s = 0;
+        let mut r = N - F;
+        let mut len = 0;
+        while len < F {
+            if let Some(b) = iterator.next() {
+                self.state.text_buffer[(r + len) as usize] = b;
+            } else {
+                break;
+            }
+            len += 1;
+        }
+        for i in 1..=F {
+            self.insert_node(r - i);
+        }
+        self.insert_node(r);
+        loop {
+            if self.match_length > len {
+                self.match_length = len;
+            }
+            if self.match_length <= THRESHOLD {
+                self.match_length = 1;
+                self.encode_char(self.state.text_buffer[r as usize] as u16);
+            } else {
+                self.encode_char(255 - THRESHOLD + self.match_length);
+                self.encode_position(self.match_position);
+            }
+            let last_match_len = self.match_length;
+
+            let mut i = 0;
+            while i < last_match_len {
+                if let Some(c) = iterator.next() {
+                    self.delete_node(s);
+                    self.state.text_buffer[s as usize] = c;
+                    if s < F - 1 {
+                        self.state.text_buffer[(s + N) as usize] = c;
+                    }
+                    s = (s + 1) & (N - 1);
+                    r = (r + 1) & (N - 1);
+                    self.insert_node(r);
+                } else {
+                    break;
+                }
+                i = i + 1;
+            }
+
+            while i < last_match_len {
+                i += 1;
+                self.delete_node(s);
+                s = (s.wrapping_add(1)) & (N - 1);
+                r = (r.wrapping_add(1)) & (N - 1);
+                len -= 1;
+                if len > 0 {
+                    self.insert_node(r)
+                }
+            }
+
+            if len == 0 {
+                break;
+            }
+        }
+    }
+
+    fn finish(self) {}
+}
+
 pub struct Decoder<I> {
     state: LzHufState,
     stream: Biterator<I>
@@ -328,6 +604,10 @@ impl<I> fmt::Debug for Decoder<I> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("unexpected end of data")]
+pub struct UnexpectedEof;
+
 impl<I: Iterator<Item = u8>> Decoder<I> {
     pub fn new<X: IntoIterator<IntoIter = I, Item = u8>>(input: X) -> Self {
         Self {
@@ -337,17 +617,17 @@ impl<I: Iterator<Item = u8>> Decoder<I> {
     }
 
     #[tracing::instrument(skip(self, buffer))]
-    pub fn decode(&mut self, buffer: &mut [u8]) -> Result<(), &'static str> {
+    pub fn decode(&mut self, buffer: &mut [u8]) -> Result<(), UnexpectedEof> {
         let mut count = 0;
         while count < buffer.len() {
-            let c = self.decode_char().ok_or("insufficient data for char")?;
+            let c = self.decode_char().ok_or(UnexpectedEof)?;
             if c < 256 {
                 let c = c as u8;
                 buffer[count] = c;
                 self.state.update_text_buffer(c);
                 count += 1;
             } else {
-                let i = (self.state.r.wrapping_sub(self.decode_position().ok_or("insufficient data for position")?).wrapping_sub(1)) & (N - 1);
+                let i = (self.state.r.wrapping_sub(self.decode_position().ok_or(UnexpectedEof)?).wrapping_sub(1)) & (N - 1);
                 let j = c - 255 + THRESHOLD;
                 for k in 0..j {
                     let c = self.state.text_buffer[((i + k) & (N - 1)) as usize];
@@ -486,15 +766,7 @@ mod tests2 {
     #[test]
     fn test_decode() -> color_eyre::Result<()> {
         let input = &include_bytes!("../samples/winlink.raw")[0x2F..0x10C];
-        let stream = Biterator {
-            input: input.into_iter().copied(),
-            bit_pos: 0,
-            bit_buffer: 0,
-        };
-        let mut decoder = Decoder {
-            state: LzHufState::new(),
-            stream,
-        };
+        let mut decoder = Decoder::new(input.iter().copied());
         let data_spot = &mut [0u8; 0x123];
         decoder.decode(data_spot)?;
         let data = std::str::from_utf8(data_spot).unwrap();
@@ -503,17 +775,20 @@ mod tests2 {
     }
 
     #[test]
+    fn test_encode() -> color_eyre::Result<()> {
+        let input: &str = include_str!("../samples/winlink.txt");
+        let mut output = Vec::with_capacity(input.len());
+        let mut encoder = Encoder::new(&mut output);
+        encoder.encode(input.as_bytes().iter().copied());
+        encoder.finish();
+        assert_eq!(&output, &include_bytes!("../samples/winlink.raw")[0x2F..0x10C]);
+        Ok(())
+    }
+
+    #[test]
     fn test_decode_single_byte() -> color_eyre::Result<()> {
         let input: [u8; 2] = [0xEC, 0x80];
-        let stream = Biterator {
-            input: input.into_iter(),
-            bit_pos: 0,
-            bit_buffer: 0,
-        };
-        let mut decoder = Decoder {
-            state: LzHufState::new(),
-            stream,
-        };
+        let mut decoder = Decoder::new(input);
         let data_spot = &mut [0u8; 1];
         decoder.decode(data_spot)?;
         assert_eq!(*data_spot, [0x4D]);
@@ -521,39 +796,55 @@ mod tests2 {
     }
 
     #[test]
+    fn test_encode_single_byte() -> color_eyre::Result<()> {
+        let input: [u8; 1] = [0x4D];
+        let mut output = Vec::with_capacity(input.len());
+        let mut encoder = Encoder::new(&mut output);
+        encoder.encode(input);
+        encoder.finish();
+        assert_eq!(&output, &[0xEC, 0x80]);
+        Ok(())
+    }
+
+    #[test]
     fn test_decode_two_bytes() -> color_eyre::Result<()> {
         let input: [u8; 3] = [0xEC, 0xE2, 0x80];
-        let stream = Biterator {
-            input: input.into_iter(),
-            bit_pos: 0,
-            bit_buffer: 0,
-        };
-        let mut decoder = Decoder {
-            state: LzHufState::new(),
-            stream,
-        };
+        let mut decoder = Decoder::new(input);
         let data_spot = &mut [0u8; 2];
         decoder.decode(data_spot)?;
         assert_eq!(*data_spot, [0x4D, 0x4D]);
         Ok(())
     }
 
+    #[test]
+    fn test_encode_two_byte() -> color_eyre::Result<()> {
+        let input: [u8; 2] = [0x4D, 0x4D];
+        let mut output = Vec::with_capacity(input.len());
+        let mut encoder = Encoder::new(&mut output);
+        encoder.encode(input);
+        encoder.finish();
+        assert_eq!(&output, &[0xEC, 0xE2, 0x80]);
+        Ok(())
+    }
 
     #[test]
     fn test_decode_thirty_two_bytes() -> color_eyre::Result<()> {
         let input: [u8; 4] = [0xEC, 0xD4, 0x00, 0x00];
-        let stream = Biterator {
-            input: input.into_iter(),
-            bit_pos: 0,
-            bit_buffer: 0,
-        };
-        let mut decoder = Decoder {
-            state: LzHufState::new(),
-            stream,
-        };
+        let mut decoder = Decoder::new(input);
         let data_spot = &mut [0u8; 32];
         decoder.decode(data_spot)?;
         assert_eq!(*data_spot, [0x4D; 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_encode_thirty_two_byte() -> color_eyre::Result<()> {
+        let input: [u8; 32] = [0x4D; 32];
+        let mut output = Vec::with_capacity(input.len());
+        let mut encoder = Encoder::new(&mut output);
+        encoder.encode(input);
+        encoder.finish();
+        assert_eq!(&output, &[0xEC, 0xD4, 0x00, 0x00]);
         Ok(())
     }
 }

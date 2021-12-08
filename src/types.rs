@@ -1,6 +1,7 @@
 use aliri_braid::braid;
 use std::borrow::Cow;
 use lazy_regex::{Lazy, lazy_regex};
+use nom::error::VerboseError;
 use regex::Regex;
 use thiserror::Error;
 
@@ -31,7 +32,7 @@ impl aliri_braid::Normalizer for StationId {
     }
 }
 
-pub fn callsign(s: &[u8]) -> nom::IResult<&[u8], &StationIdRef> {
+pub fn callsign(s: &[u8]) -> nom::IResult<&[u8], &StationIdRef, VerboseError<&[u8]>> {
     let (rest, result) = nom::bytes::complete::take_while_m_n(3,7, |c: u8| c.is_ascii_uppercase() || c.is_ascii_digit())(s)?;
     // let cow = if result.iter().any(|&b| b'a' <= b && b <= b'z') {
     //     Cow::Owned(unsafe { String::from_utf8_unchecked(result.to_ascii_uppercase()) })
